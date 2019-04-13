@@ -1,9 +1,12 @@
 import logging
 import tempfile
 import os
+from threading import Thread
+
 import torch
 from collections import OrderedDict
 from tqdm import tqdm
+import numpy as np
 
 from maskrcnn_benchmark.modeling.roi_heads.mask_head.inference import Masker
 from maskrcnn_benchmark.structures.bounding_box import BoxList
@@ -101,14 +104,12 @@ def prepare_for_coco_detection(predictions, dataset):
     return coco_results
 
 
-def prepare_for_coco_segmentation(predictions, dataset):
+def _run_coco_segmentation(predictions, dataset, masker, rank, indices, result_dict):
     import pycocotools.mask as mask_util
-    import numpy as np
 
-    masker = Masker(threshold=0.5, padding=1)
-    # assert isinstance(dataset, COCODataset)
     coco_results = []
-    for image_id, prediction in tqdm(enumerate(predictions)):
+    for image_id in tqdm(indices):
+        prediction = predictions[image_id]
         original_id = dataset.id_to_img_map[image_id]
         if len(prediction) == 0:
             continue
@@ -152,6 +153,29 @@ def prepare_for_coco_segmentation(predictions, dataset):
                 for k, rle in enumerate(rles)
             ]
         )
+    result_dict[rank] = coco_results
+
+
+def prepare_for_coco_segmentation(predictions, dataset):
+    masker = Masker(threshold=0.5, padding=1)
+    # assert isinstance(dataset, COCODataset)
+    result_dict = {}
+    total_threads = 5
+    threads = []
+    indices = list(range(len(dataset)))
+    for rank in range(total_threads):
+        thread = Thread(target=_run_coco_segmentation, args=(predictions, dataset, masker, rank,
+                                                             indices[rank::total_threads], result_dict))
+        thread.start()
+        threads.append(thread)
+
+    for i in range(total_threads):
+        threads[i].join()
+
+    coco_results = []
+    for rank in result_dict:
+        coco_results.extend(result_dict[rank])
+
     return coco_results
 
 
